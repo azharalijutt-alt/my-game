@@ -3,47 +3,64 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>My Super Store 3D</title>
+    <title>Infinite Runner 3D</title>
     <style>
         body {
             margin: 0;
             overflow: hidden;
-            background-color: #87CEEB; /* Sky color fallback */
+            background-color: #2c3e50;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             user-select: none;
+            touch-action: none; /* Prevents mobile scrolling */
         }
-        #game-ui {
+        #ui-layer {
             position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none; /* Let clicks pass through to the game */
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
         }
         .hud-panel {
-            position: absolute;
-            background: rgba(0, 0, 0, 0.6);
+            background: rgba(0, 0, 0, 0.5);
             color: white;
-            padding: 15px;
+            padding: 10px 20px;
             border-radius: 8px;
-            backdrop-filter: blur(5px);
+            font-size: 24px;
+            font-weight: bold;
+            backdrop-filter: blur(4px);
+            display: inline-block;
         }
-        #money-display { top: 20px; right: 20px; font-size: 24px; font-weight: bold; color: #4CAF50; }
-        #time-display { top: 20px; left: 20px; font-size: 18px; }
-        #crosshair {
+        #score-display { color: #f1c40f; }
+        #game-over {
             position: absolute;
             top: 50%; left: 50%;
-            width: 10px; height: 10px;
-            background: rgba(255, 255, 255, 0.8);
-            border-radius: 50%;
             transform: translate(-50%, -50%);
-        }
-        #instructions {
-            position: absolute;
-            bottom: 20px; left: 50%;
-            transform: translateX(-50%);
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 40px;
+            border-radius: 15px;
             text-align: center;
-            font-size: 14px;
+            display: none;
+            pointer-events: auto;
+        }
+        button {
+            margin-top: 20px;
+            padding: 10px 20px;
+            font-size: 18px;
+            background: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        #controls-hint {
+            text-align: center;
+            color: rgba(255,255,255,0.7);
+            font-size: 16px;
+            margin-bottom: 20px;
         }
     </style>
     <script type="importmap">
@@ -57,181 +74,332 @@
 </head>
 <body>
 
-    <div id="game-ui">
-        <div id="time-display" class="hud-panel">Day 1 - 08:00 AM</div>
-        <div id="money-display" class="hud-panel">$1,250.00</div>
-        <div id="crosshair"></div>
-        <div id="instructions" class="hud-panel">
-            Click to Lock Mouse | W A S D to Move | SHIFT to Sprint | E to Interact
+    <div id="ui-layer">
+        <div>
+            <div class="hud-panel">Score: <span id="score-display">0</span></div>
         </div>
+        <div id="controls-hint">PC: A/D/Arrows to Move, Space to Jump | Mobile: Swipe</div>
+    </div>
+
+    <div id="game-over">
+        <h1 style="margin-top:0; color: #e74c3c;">CRASHED!</h1>
+        <p>Final Score: <span id="final-score">0</span></p>
+        <button onclick="location.reload()">Play Again</button>
     </div>
 
     <script type="module">
         import * as THREE from 'three';
-        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+        import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+
+        // --- Game Constants & Variables ---
+        const LANE_WIDTH = 2.5;
+        const GRAVITY = -40;
+        const JUMP_FORCE = 15;
+        const GAME_SPEED_START = 20;
         
-        // ==========================================
-        // 1. GAME STATE & VARIABLES
-        // ==========================================
-        let camera, scene, renderer, controls;
-        let prevTime = performance.now();
-        const velocity = new THREE.Vector3();
-        const direction = new THREE.Vector3();
+        let scene, camera, renderer, clock;
+        let playerGroup, playerMixer;
+        let animActions = { run: null, jump: null };
+        let currentAnim = 'run';
         
-        // Input state
-        const keys = { KeyW: false, KeyA: false, KeyS: false, KeyD: false, ShiftLeft: false };
+        let gameSpeed = GAME_SPEED_START;
+        let score = 0;
+        let isGameOver = false;
         
-        // Game Data
-        let money = 1250;
-        let isSprint = false;
+        // Player State
+        let currentLane = 0; // -1 (left), 0 (mid), 1 (right)
+        let playerVelocityY = 0;
+        let isJumping = false;
+        
+        // Arrays for infinite objects
+        const obstacles = [];
+        const coins = [];
 
         init();
         animate();
 
-        // ==========================================
-        // 2. INITIALIZATION
-        // ==========================================
         function init() {
-            // Scene Setup
+            clock = new THREE.Clock();
+
+            // 1. Scene Setup
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x87CEEB);
-            scene.fog = new THREE.Fog(0x87CEEB, 20, 100); // Realistic depth
+            scene.background = new THREE.Color(0x87CEEB); // Sky blue
+            scene.fog = new THREE.Fog(0x87CEEB, 20, 80); // Fades objects in smoothly
 
-            // Camera Setup
-            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.y = 1.6; // Average human eye level
+            // 2. Camera Setup (Fixed behind player)
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 4, 8);
+            camera.lookAt(0, 1, -10);
 
-            // Lighting (Realistic Shadows)
-            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
-            hemiLight.position.set(0, 200, 0);
-            scene.add(hemiLight);
-
-            const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
-            dirLight.position.set(20, 50, -20);
+            // 3. Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+            dirLight.position.set(-10, 20, 10);
             dirLight.castShadow = true;
-            dirLight.shadow.camera.top = 50;
-            dirLight.shadow.camera.bottom = -50;
-            dirLight.shadow.camera.left = -50;
-            dirLight.shadow.camera.right = 50;
-            dirLight.shadow.mapSize.width = 2048; // High res shadows
-            dirLight.shadow.mapSize.height = 2048;
+            dirLight.shadow.camera.left = -10;
+            dirLight.shadow.camera.right = 10;
+            dirLight.shadow.camera.top = 20;
+            dirLight.shadow.camera.bottom = -20;
             scene.add(dirLight);
 
-            // Renderer Setup
+            // 4. Renderer
             renderer = new THREE.WebGLRenderer({ antialias: true });
-            renderer.setPixelRatio(window.devicePixelRatio);
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.shadowMap.enabled = true;
-            renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Smooth shadows
             document.body.appendChild(renderer.domElement);
 
-            // Controls (First Person / Third Person foundation)
-            controls = new PointerLockControls(camera, document.body);
-            document.addEventListener('click', () => { controls.lock(); });
-            scene.add(controls.getObject());
+            // 5. Environment (Ground)
+            const groundGeo = new THREE.PlaneGeometry(100, 400);
+            const groundMat = new THREE.MeshStandardMaterial({ color: 0x4CAF50 }); // Grass green
+            const ground = new THREE.Mesh(groundGeo, groundMat);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
 
-            // Key Listeners
-            document.addEventListener('keydown', onKeyDown);
-            document.addEventListener('keyup', onKeyUp);
+            // Add Lane markers
+            const pathGeo = new THREE.PlaneGeometry(LANE_WIDTH * 3, 400);
+            const pathMat = new THREE.MeshStandardMaterial({ color: 0x555555 }); // Dark road
+            const path = new THREE.Mesh(pathGeo, pathMat);
+            path.rotation.x = -Math.PI / 2;
+            path.position.y = 0.01; // Slightly above ground
+            path.receiveShadow = true;
+            scene.add(path);
+
+            // 6. Build Player
+            playerGroup = new THREE.Group();
+            scene.add(playerGroup);
+            loadPlayerModels();
+
+            // 7. Inputs (Keyboard & Touch)
+            setupControls();
+
+            // 8. Initial World Generation
+            for(let i=0; i<10; i++) spawnWorldRow(i * -15 - 20);
+
             window.addEventListener('resize', onWindowResize);
-
-            buildSupermarketEnvironment();
         }
 
-        // ==========================================
-        // 3. ENVIRONMENT & PLACEHOLDERS
-        // ==========================================
-        function buildSupermarketEnvironment() {
-            // Floor
-            const floorGeometry = new THREE.PlaneGeometry(100, 100);
-            const floorMaterial = new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.1, metalness: 0.1 }); // Shiny supermarket floor
-            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
-            floor.rotation.x = -Math.PI / 2;
-            floor.receiveShadow = true;
-            scene.add(floor);
-
-            // Placeholder Shelves
-            const shelfGeometry = new THREE.BoxGeometry(2, 2.5, 8);
-            const shelfMaterial = new THREE.MeshStandardMaterial({ color: 0x888888 });
+        // --- Asset Loading & Animation ---
+        function loadPlayerModels() {
+            const loader = new FBXLoader();
             
-            // Create a few aisles
-            for(let i = -10; i <= 10; i += 5) {
-                if(i === 0) continue; // Leave middle open
-                const shelf = new THREE.Mesh(shelfGeometry, shelfMaterial);
-                shelf.position.set(i, 1.25, -10);
-                shelf.castShadow = true;
-                shelf.receiveShadow = true;
-                scene.add(shelf);
+            // Create a fallback capsule in case FBX fails to load
+            const fallbackGeo = new THREE.CapsuleGeometry(0.5, 1, 4, 8);
+            const fallbackMat = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+            const fallbackMesh = new THREE.Mesh(fallbackGeo, fallbackMat);
+            fallbackMesh.position.y = 1;
+            fallbackMesh.castShadow = true;
+            playerGroup.add(fallbackMesh);
+
+            // Attempt to load main running model
+            loader.load('running.fbx', (fbx) => {
+                playerGroup.remove(fallbackMesh); // Remove fallback
+                
+                fbx.scale.set(0.01, 0.01, 0.01); // Standard fix for FBX scaling
+                fbx.rotation.y = Math.PI; // Face away from camera
+                
+                fbx.traverse(c => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+                playerGroup.add(fbx);
+
+                playerMixer = new THREE.AnimationMixer(fbx);
+                if (fbx.animations.length > 0) {
+                    animActions.run = playerMixer.clipAction(fbx.animations[0]);
+                    animActions.run.play();
+                }
+
+                // Load jump (idle) animation
+                loader.load('idle.fbx', (idleFbx) => {
+                    if (idleFbx.animations.length > 0) {
+                        animActions.jump = playerMixer.clipAction(idleFbx.animations[0]);
+                        // Don't loop jump animation, play it once
+                        animActions.jump.setLoop(THREE.LoopOnce);
+                        animActions.jump.clampWhenFinished = true;
+                    }
+                });
+            }, undefined, (error) => {
+                console.warn("FBX load failed. Using fallback capsule.", error);
+            });
+        }
+
+        function playAnimation(animName) {
+            if (!playerMixer || !animActions[animName] || currentAnim === animName) return;
+            
+            const prevAction = animActions[currentAnim];
+            const nextAction = animActions[animName];
+            
+            if (prevAction) prevAction.fadeOut(0.2);
+            nextAction.reset().fadeIn(0.2).play();
+            
+            currentAnim = animName;
+        }
+
+        // --- World Generation ---
+        function spawnWorldRow(zPos) {
+            // Pick a random lane for an obstacle
+            const obsLane = Math.floor(Math.random() * 3) - 1; 
+            
+            // Spawn Obstacle (Red Box)
+            const obsGeo = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+            const obsMat = new THREE.MeshStandardMaterial({ color: 0xe74c3c });
+            const obstacle = new THREE.Mesh(obsGeo, obsMat);
+            obstacle.position.set(obsLane * LANE_WIDTH, 0.75, zPos);
+            obstacle.castShadow = true;
+            scene.add(obstacle);
+            obstacles.push(obstacle);
+
+            // Spawn Coin in a different lane
+            let coinLane = Math.floor(Math.random() * 3) - 1;
+            if (coinLane === obsLane) coinLane = (coinLane + 1) > 1 ? -1 : coinLane + 1;
+
+            const coinGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.2, 16);
+            const coinMat = new THREE.MeshStandardMaterial({ color: 0xf1c40f, metalness: 0.8, roughness: 0.2 });
+            const coin = new THREE.Mesh(coinGeo, coinMat);
+            coin.rotation.x = Math.PI / 2; // Stand coin up
+            coin.position.set(coinLane * LANE_WIDTH, 1, zPos);
+            scene.add(coin);
+            coins.push(coin);
+        }
+
+        // --- Input Handling ---
+        function setupControls() {
+            // Keyboard
+            document.addEventListener('keydown', (e) => {
+                if(isGameOver) return;
+                if (e.code === 'ArrowLeft' || e.code === 'KeyA') movePlayer(-1);
+                if (e.code === 'ArrowRight' || e.code === 'KeyD') movePlayer(1);
+                if (e.code === 'ArrowUp' || e.code === 'Space' || e.code === 'KeyW') jump();
+            });
+
+            // Touch (Mobile)
+            let touchStartX = 0;
+            let touchStartY = 0;
+            
+            document.addEventListener('touchstart', e => {
+                touchStartX = e.changedTouches[0].screenX;
+                touchStartY = e.changedTouches[0].screenY;
+            });
+
+            document.addEventListener('touchend', e => {
+                if(isGameOver) return;
+                let touchEndX = e.changedTouches[0].screenX;
+                let touchEndY = e.changedTouches[0].screenY;
+                
+                let dx = touchEndX - touchStartX;
+                let dy = touchEndY - touchStartY;
+                
+                if (Math.abs(dx) > Math.abs(dy)) {
+                    // Horizontal swipe
+                    if (dx > 30) movePlayer(1);
+                    else if (dx < -30) movePlayer(-1);
+                } else {
+                    // Vertical swipe
+                    if (dy < -30) jump(); // Swipe up
+                }
+            });
+        }
+
+        function movePlayer(direction) {
+            currentLane += direction;
+            currentLane = Math.max(-1, Math.min(1, currentLane)); // Clamp between -1 and 1
+        }
+
+        function jump() {
+            if (!isJumping) {
+                isJumping = true;
+                playerVelocityY = JUMP_FORCE;
+                playAnimation('jump');
+            }
+        }
+
+        // --- Game Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+            if(isGameOver) return;
+
+            const delta = clock.getDelta();
+
+            // 1. Update Animations
+            if (playerMixer) playerMixer.update(delta);
+
+            // 2. Player Movement Physics
+            // Smooth horizontal movement to current lane
+            const targetX = currentLane * LANE_WIDTH;
+            playerGroup.position.x += (targetX - playerGroup.position.x) * 10 * delta;
+
+            // Vertical Jump Physics
+            if (isJumping) {
+                playerGroup.position.y += playerVelocityY * delta;
+                playerVelocityY += GRAVITY * delta;
+
+                // Landed
+                if (playerGroup.position.y <= 0) {
+                    playerGroup.position.y = 0;
+                    isJumping = false;
+                    playerVelocityY = 0;
+                    playAnimation('run'); // Return to running animation
+                }
             }
 
-            // Cashier Counter
-            const counterGeo = new THREE.BoxGeometry(4, 1.2, 2);
-            const counterMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
-            const counter = new THREE.Mesh(counterGeo, counterMat);
-            counter.position.set(0, 0.6, 5);
-            counter.castShadow = true;
-            counter.receiveShadow = true;
-            scene.add(counter);
+            // 3. Move World Objects (Illusion of running)
+            const moveDist = gameSpeed * delta;
             
-            // TODO: Here is where you will load your FBX models!
-            // import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
-            // const loader = new FBXLoader();
-            // loader.load('customers/customer1_idle.fbx', (object) => { scene.add(object); });
+            for(let i = obstacles.length - 1; i >= 0; i--) {
+                const obs = obstacles[i];
+                obs.position.z += moveDist;
+
+                // Collision Check (Simple bounding box)
+                if (Math.abs(obs.position.z - playerGroup.position.z) < 1.0 &&
+                    Math.abs(obs.position.x - playerGroup.position.x) < 1.0 &&
+                    playerGroup.position.y < 1.5) {
+                    triggerGameOver();
+                }
+
+                // Remove objects that pass behind camera
+                if (obs.position.z > 5) {
+                    scene.remove(obs);
+                    obstacles.splice(i, 1);
+                    spawnWorldRow(-80); // Spawn new row far ahead
+                }
+            }
+
+            for(let i = coins.length - 1; i >= 0; i--) {
+                const coin = coins[i];
+                coin.position.z += moveDist;
+                coin.rotation.z += 5 * delta; // Spin coin
+
+                // Collection Check
+                if (Math.abs(coin.position.z - playerGroup.position.z) < 1.5 &&
+                    Math.abs(coin.position.x - playerGroup.position.x) < 1.5 &&
+                    Math.abs(coin.position.y - playerGroup.position.y - 1) < 1.5) {
+                    
+                    scene.remove(coin);
+                    coins.splice(i, 1);
+                    score += 10;
+                    document.getElementById('score-display').innerText = score;
+                } else if (coin.position.z > 5) {
+                    scene.remove(coin);
+                    coins.splice(i, 1);
+                }
+            }
+
+            // 4. Increase Difficulty over time
+            gameSpeed += delta * 0.2; 
+            
+            renderer.render(scene, camera);
         }
 
-        // ==========================================
-        // 4. INPUT HANDLING
-        // ==========================================
-        function onKeyDown(event) {
-            if (keys.hasOwnProperty(event.code)) keys[event.code] = true;
-        }
-
-        function onKeyUp(event) {
-            if (keys.hasOwnProperty(event.code)) keys[event.code] = false;
+        function triggerGameOver() {
+            isGameOver = true;
+            document.getElementById('game-over').style.display = 'block';
+            document.getElementById('final-score').innerText = score;
         }
 
         function onWindowResize() {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
-        }
-
-        // ==========================================
-        // 5. MAIN GAME LOOP
-        // ==========================================
-        function animate() {
-            requestAnimationFrame(animate);
-
-            const time = performance.now();
-
-            if (controls.isLocked === true) {
-                const delta = (time - prevTime) / 1000;
-
-                // Physics/Movement smoothing
-                velocity.x -= velocity.x * 10.0 * delta;
-                velocity.z -= velocity.z * 10.0 * delta;
-
-                direction.z = Number(keys.KeyW) - Number(keys.KeyS);
-                direction.x = Number(keys.KeyD) - Number(keys.KeyA);
-                direction.normalize(); // Ensure consistent diagonal movement speed
-
-                // Sprint logic
-                const speed = keys.ShiftLeft ? 150.0 : 50.0;
-
-                if (keys.KeyW || keys.KeyS) velocity.z -= direction.z * speed * delta;
-                if (keys.KeyA || keys.KeyD) velocity.x -= direction.x * speed * delta;
-
-                controls.moveRight(-velocity.x * delta);
-                controls.moveForward(-velocity.z * delta);
-                
-                // Simple boundary check (keep player on floor)
-                if (controls.getObject().position.y < 1.6) {
-                    controls.getObject().position.y = 1.6;
-                }
-            }
-
-            prevTime = time;
-            renderer.render(scene, camera);
         }
     </script>
 </body>
